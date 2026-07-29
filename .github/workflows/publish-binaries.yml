@@ -8,7 +8,6 @@ on:
   workflow_dispatch:
 
 env:
-  FRAMEWORK: net8.0
   RAW_BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
   # 7.x is currently a beta and its download filename differs, which 404s
   INNOVERSION: 6.7.2
@@ -39,6 +38,13 @@ jobs:
           TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0.0")
           RADARR_VERSION="${TAG#v}"
           BRANCH_NAME="${RAW_BRANCH_NAME//\//-}"
+
+          # Read the target framework from the csproj rather than hardcoding it,
+          # so an upstream .NET bump is picked up automatically.
+          FRAMEWORK=$(sed -n 's/.*<TargetFrameworks>\([^<]*\)<.*/\1/p' src/NzbDrone.Core/*.Core.csproj | head -1)
+          if [ -z "$FRAMEWORK" ]; then echo "Could not determine target framework"; exit 1; fi
+          echo "Target framework: $FRAMEWORK"
+          echo "FRAMEWORK=$FRAMEWORK" >> "$GITHUB_ENV"
 
           # radarr.iss reads MAJORVERSION/MINORVERSION/RADARRVERSION from the env
           echo "RADARRVERSION=$RADARR_VERSION" >> "$GITHUB_ENV"
@@ -77,7 +83,7 @@ jobs:
             "osx-arm64:osx-core-arm64" ; do
             rid="${entry%%:*}"
             name="${entry##*:}"
-            src="_artifacts/$rid/${{ env.FRAMEWORK }}"
+            src="_artifacts/$rid/$FRAMEWORK"
             if [ -d "$src/Radarr" ]; then
               tar -czf "_release/Radarr.$branch.$version.$name.tar.gz" -C "$src" Radarr
               echo "packaged $name"
@@ -89,7 +95,7 @@ jobs:
           for entry in "win-x64:windows-core-x64" "win-x86:windows-core-x86" ; do
             rid="${entry%%:*}"
             name="${entry##*:}"
-            src="_artifacts/$rid/${{ env.FRAMEWORK }}"
+            src="_artifacts/$rid/$FRAMEWORK"
             if [ -d "$src/Radarr" ]; then
               (cd "$src" && 7z a -tzip "$GITHUB_WORKSPACE/_release/Radarr.$branch.$version.$name.zip" ./Radarr > /dev/null)
               echo "packaged $name"
