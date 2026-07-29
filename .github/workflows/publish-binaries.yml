@@ -1,0 +1,121 @@
+name: Publish Binaries
+
+# Builds and publishes binaries for all platforms and attaches them to a
+# GitHub release. Triggered manually, the same way as Push Docker Image, so
+# the normal Build workflow stays fast and is unaffected by this.
+
+on:
+  workflow_dispatch:
+
+env:
+  FRAMEWORK: net8.0
+  RAW_BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+  # 7.x is currently a beta and its download filename differs, which 404s
+  INNOVERSION: 6.7.2
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Setup Node.js (Volta)
+        uses: volta-cli/action@v4
+
+      - name: Setup Variables
+        id: variables
+        shell: bash
+        run: |
+          TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0.0")
+          RADARR_VERSION="${TAG#v}"
+          BRANCH_NAME="${RAW_BRANCH_NAME//\//-}"
+
+          # radarr.iss reads MAJORVERSION/MINORVERSION/RADARRVERSION from the env
+          echo "RADARRVERSION=$RADARR_VERSION" >> "$GITHUB_ENV"
+          echo "MAJORVERSION=${RADARR_VERSION%.*}" >> "$GITHUB_ENV"
+          echo "MINORVERSION=${RADARR_VERSION##*.}" >> "$GITHUB_ENV"
+          echo "BRANCH=$BRANCH_NAME" >> "$GITHUB_ENV"
+          echo "BUILD_SOURCEBRANCHNAME=$BRANCH_NAME" >> "$GITHUB_ENV"
+
+          echo "version=$RADARR_VERSION" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Yarn Install
+        run: yarn install
+
+      - name: Build All Platforms + Installer
+        shell: bash
+        run: ./build.sh --backend --frontend --packages --installer
+
+      - name: Create Release Packages
+        shell: bash
+        run: |
+          set -e
+          mkdir -p _release
+          version="${{ steps.variables.outputs.version }}"
+          branch="${{ steps.variables.outputs.branch }}"
+
+          # rid:release-name
+          for entry in \
+            "linux-x64:linux-core-x64" \
+            "linux-musl-x64:linux-musl-core-x64" \
+            "linux-arm:linux-core-arm" \
+            "linux-arm64:linux-core-arm64" \
+            "linux-musl-arm:linux-musl-core-arm" \
+            "linux-musl-arm64:linux-musl-core-arm64" \
+            "osx-x64:osx-core-x64" \
+            "osx-arm64:osx-core-arm64" ; do
+            rid="${entry%%:*}"
+            name="${entry##*:}"
+            src="_artifacts/$rid/${{ env.FRAMEWORK }}"
+            if [ -d "$src/Radarr" ]; then
+              tar -czf "_release/Radarr.$branch.$version.$name.tar.gz" -C "$src" Radarr
+              echo "packaged $name"
+            else
+              echo "WARNING: $src/Radarr missing, skipping $name"
+            fi
+          done
+
+          for entry in "win-x64:windows-core-x64" "win-x86:windows-core-x86" ; do
+            rid="${entry%%:*}"
+            name="${entry##*:}"
+            src="_artifacts/$rid/${{ env.FRAMEWORK }}"
+            if [ -d "$src/Radarr" ]; then
+              (cd "$src" && 7z a -tzip "$GITHUB_WORKSPACE/_release/Radarr.$branch.$version.$name.zip" ./Radarr > /dev/null)
+              echo "packaged $name"
+            else
+              echo "WARNING: $src/Radarr missing, skipping $name"
+            fi
+          done
+
+          # Inno Setup writes installers here
+          if compgen -G "distribution/windows/setup/output/Radarr.*.exe" > /dev/null; then
+            cp distribution/windows/setup/output/Radarr.*.exe _release/
+            echo "copied installers"
+          else
+            echo "ERROR: no installers produced"; exit 1
+          fi
+
+          echo "--- release contents ---"
+          ls -la _release/
+
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: _release/*
+          commit: ${{ github.sha }}
+          generateReleaseNotes: true
+          name: ${{ steps.variables.outputs.version }}
+          prerelease: ${{ steps.variables.outputs.branch != 'master' }}
+          allowUpdates: true
+          tag: v${{ steps.variables.outputs.version }}
